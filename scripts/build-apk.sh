@@ -8,13 +8,16 @@ cd "$ROOT"
 
 export PATH="$HOME/.cargo/bin:$PATH"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
-export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/29.0.14206865}"
+NDK_VERSION="${NDK_VERSION:-29.0.14206865}"
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/$NDK_VERSION}"
 if [[ -n "${JAVA_HOME:-}" ]]; then
     export PATH="$JAVA_HOME/bin:$PATH"
 fi
 
-PLATFORM_JAR="$ANDROID_HOME/platforms/android-37.2/android.jar"
-BUILD_TOOLS="$ANDROID_HOME/build-tools/37.0.0"
+PLATFORM_VERSION="${PLATFORM_VERSION:-android-37.2}"
+BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-37.0.0}"
+PLATFORM_JAR="$ANDROID_HOME/platforms/$PLATFORM_VERSION/android.jar"
+BUILD_TOOLS="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
 AAPT2="$BUILD_TOOLS/aapt2"
 APKSIGNER="$BUILD_TOOLS/apksigner"
 ZIPALIGN="$BUILD_TOOLS/zipalign"
@@ -23,8 +26,8 @@ if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/keytool" ]]; then
     KEYTOOL="$JAVA_HOME/bin/keytool"
 fi
 
-MIN_SDK=26
-TARGET_SDK=37
+MIN_SDK="${MIN_SDK:-26}"
+TARGET_SDK="${TARGET_SDK:-37}"
 LIB_NAME=libmentalcalc_android.so
 APK_DIR="$ROOT/target/apk"
 STAGE="$APK_DIR/stage"
@@ -38,7 +41,16 @@ die() {
     exit 1
 }
 
-for tool in cargo-ndk "$PLATFORM_JAR" "$AAPT2" "$APKSIGNER" "$ZIPALIGN" "$KEYTOOL" zip unzip; do
+case "$(uname -s)-$(uname -m)" in
+    Darwin-*) NDK_HOST_DEFAULT=darwin-x86_64 ;;
+    Linux-x86_64) NDK_HOST_DEFAULT=linux-x86_64 ;;
+    *) NDK_HOST_DEFAULT="" ;;
+esac
+NDK_HOST_TAG="${NDK_HOST_TAG:-$NDK_HOST_DEFAULT}"
+[[ -n "$NDK_HOST_TAG" ]] || die "unsupported host; set NDK_HOST_TAG to your NDK prebuilt host directory"
+LLVM_STRIP="${LLVM_STRIP:-$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin/llvm-strip}"
+
+for tool in cargo-ndk "$PLATFORM_JAR" "$AAPT2" "$APKSIGNER" "$ZIPALIGN" "$LLVM_STRIP" "$KEYTOOL" zip unzip; do
     if [[ "$tool" == */* ]]; then
         [[ -e "$tool" ]] || die "missing $tool"
     else
@@ -63,7 +75,8 @@ echo "==> 2/6 aapt2 link manifest"
     --target-sdk-version "$TARGET_SDK" \
     -o "$UNSIGNED"
 
-echo "==> 3/6 add native libraries, stored uncompressed"
+echo "==> 3/6 add native libraries, stripped, stored uncompressed"
+"$LLVM_STRIP" --strip-unneeded "$STAGE/lib/arm64-v8a/$LIB_NAME" "$STAGE/lib/x86_64/$LIB_NAME"
 (
     cd "$STAGE"
     zip -q -0 "$UNSIGNED" "lib/arm64-v8a/$LIB_NAME" "lib/x86_64/$LIB_NAME"
