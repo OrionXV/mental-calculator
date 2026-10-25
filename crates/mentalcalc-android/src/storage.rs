@@ -93,12 +93,21 @@ impl Storage {
         }
     }
 
+    /// Writes a temp file, syncs it to disk, renames it over the target, then syncs
+    /// the directory so the rename itself survives a crash.
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
         let target = self.dir.join(name);
         let temp = self.dir.join(format!("{name}.tmp"));
-        fs::write(&temp, bytes)?;
-        fs::rename(temp, target)
+        {
+            let mut file = fs::File::create(&temp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
+        fs::rename(&temp, &target)?;
+        #[cfg(unix)]
+        fs::File::open(&self.dir)?.sync_all()?;
+        Ok(())
     }
 }
 

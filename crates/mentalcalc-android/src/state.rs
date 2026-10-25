@@ -16,6 +16,19 @@ use crate::strings::Language;
 
 pub const FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 
+/// A gap between two frames longer than this means the app was in the
+/// background, so the gap is not counted as session time.
+pub const MAX_FRAME_GAP: Duration = Duration::from_secs(2);
+
+/// Session time for a frame that started `gap` after the previous one.
+pub fn frame_time(gap: Duration) -> Duration {
+    if gap > MAX_FRAME_GAP {
+        Duration::ZERO
+    } else {
+        gap
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Main,
@@ -105,6 +118,9 @@ pub struct AppState {
     pub dialog: Option<Dialog>,
     pub notice: Option<Notice>,
     resume_after_dialog: bool,
+    /// Last focus state seen from the window. `None` until the first report, so
+    /// a window that starts unfocused is not treated as having lost focus.
+    window_focused: Option<bool>,
     storage: Storage,
     rng: StdRng,
 }
@@ -130,6 +146,7 @@ impl AppState {
             dialog: None,
             notice: None,
             resume_after_dialog: false,
+            window_focused: None,
             storage,
             rng,
         }
@@ -212,6 +229,27 @@ impl AppState {
         if session.phase() == Phase::TimeUp {
             self.finish_session(now);
         }
+    }
+
+    /// Advances the clock by one rendered frame. `gap` is the real time since the
+    /// previous frame; long gaps (the app was in the background) are not counted.
+    pub fn advance_frame(&mut self, gap: Duration, now: Timestamp) {
+        self.tick(frame_time(gap), now);
+    }
+
+    /// Pauses a running session when the window loses focus, the same as the
+    /// Pause button. Only a change from focused to unfocused pauses.
+    pub fn set_window_focused(&mut self, focused: bool) {
+        if self.window_focused == Some(true) && !focused {
+            let running = self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.phase() == Phase::Running);
+            if running {
+                self.toggle_pause();
+            }
+        }
+        self.window_focused = Some(focused);
     }
 
     fn go(&mut self, screen: Screen) {
@@ -342,18 +380,21 @@ impl AppState {
         let summary = match session.finish() {
             Ok(summary) => summary,
             Err(err) => {
-                self.notice = Some(Notice::Failure(err.to_string()));
                 self.go(Screen::Main);
+                self.notice = Some(Notice::Failure(err.to_string()));
                 return;
             }
         };
         let record = ArchiveRecord::from_summary(&summary, now);
-        if let Err(err) = self.storage.append_record(&record) {
-            self.notice = Some(Notice::Failure(err.to_string()));
-        }
+        let saved = self.storage.append_record(&record);
         self.records.insert(0, record);
         self.result = Some(summary);
+        // Set after `go`, which clears the notice, so the failure stays visible on Result.
         self.go(Screen::Result);
+        if let Err(err) = saved {
+            log::error!("failed to save session record: {err}");
+            self.notice = Some(Notice::Failure(err.to_string()));
+        }
     }
 
     fn clear_archive(&mut self) {
@@ -380,10 +421,25 @@ impl AppState {
 
 /// Grade for an archived session, using the same bands as a live result.
 pub fn grade_for(tasks: u32, correct: u32) -> Grade {
-    match (correct * 100).checked_div(tasks) {
-        Some(percent) => Grade::from_percent(percent),
-        None => Grade::NoTasks,
+    if tasks == 0 {
+        Grade::NoTasks
+    } else {
+        Grade::from_percent(percent_correct(tasks, correct))
     }
+}
+
+/// Correct answers as a percent, rounded down. Archive lines are hand-editable,
+/// so the math is done in u64 and the result is capped at 100.
+pub fn percent_correct(tasks: u32, correct: u32) -> u32 {
+    u64::from(correct)
+        .saturating_mul(100)
+        .checked_div(u64::from(tasks))
+        .map_or(0, |percent| percent.min(100) as u32)
+}
+
+/// Total tasks over all archived sessions. Summed in u64 so it cannot overflow.
+pub fn total_tasks(records: &[ArchiveRecord]) -> u64 {
+    records.iter().map(|record| u64::from(record.tasks)).sum()
 }
 
 /// Newest-first ordering key for archive records.
@@ -691,6 +747,105 @@ mod tests {
         assert_eq!(grade_for(20, 14), Grade::Perfect);
         assert_eq!(grade_for(20, 7), Grade::Bad);
         assert_eq!(grade_for(20, 0), Grade::VeryBad);
+    }
+
+    /// Regression: `correct * 100` and the task sum overflowed u32 on large
+    /// hand-edited counts.
+    #[test]
+    fn large_archive_counts_do_not_overflow() {
+        let dir = TempDir::new("large-counts");
+        seed_archive(
+            &dir,
+            "2014/12/11_10:30:00 4294967295 4294967295 0 5 2 1 0 0 0\n\
+             2014/12/10_10:30:00 4294967295 1 4294967294 5 2 1 0 0 0\n",
+        );
+        let state = app(&dir);
+        assert_eq!(state.records.len(), 2);
+        assert_eq!(total_tasks(&state.records), 2 * u64::from(u32::MAX));
+        assert_eq!(percent_correct(u32::MAX, u32::MAX), 100);
+        assert_eq!(percent_correct(u32::MAX, 1), 0);
+        assert_eq!(grade_for(u32::MAX, u32::MAX), Grade::Perfect);
+        assert_eq!(grade_for(u32::MAX, 1), Grade::VeryBad);
+        // Correct above tasks is not a valid record, but it must not panic or wrap.
+        assert_eq!(percent_correct(1, u32::MAX), 100);
+    }
+
+    #[test]
+    fn percent_rounds_down() {
+        assert_eq!(percent_correct(3, 2), 66);
+        assert_eq!(percent_correct(0, 0), 0);
+    }
+
+    #[test]
+    fn normal_frames_add_their_full_elapsed_time() {
+        let dir = TempDir::new("frames");
+        let mut state = app(&dir);
+        start(&mut state);
+        state.advance_frame(Duration::from_millis(16), now());
+        state.advance_frame(Duration::from_millis(1500), now());
+        assert_eq!(
+            state.session.as_ref().unwrap().elapsed(),
+            Duration::from_millis(1516)
+        );
+    }
+
+    #[test]
+    fn a_long_gap_in_the_background_adds_nothing() {
+        let dir = TempDir::new("gap");
+        let mut state = app(&dir);
+        start(&mut state);
+        state.advance_frame(Duration::from_secs(3), now());
+        assert_eq!(state.session.as_ref().unwrap().elapsed(), Duration::ZERO);
+        assert_eq!(frame_time(Duration::from_secs(2)), Duration::from_secs(2));
+        assert_eq!(frame_time(Duration::from_millis(2001)), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_paused_session_adds_nothing() {
+        let dir = TempDir::new("paused-frames");
+        let mut state = app(&dir);
+        start(&mut state);
+        state.apply(Action::TogglePause);
+        state.advance_frame(Duration::from_secs(1), now());
+        assert_eq!(state.session.as_ref().unwrap().elapsed(), Duration::ZERO);
+    }
+
+    #[test]
+    fn losing_window_focus_pauses_a_running_session() {
+        let dir = TempDir::new("focus");
+        let mut state = app(&dir);
+        start(&mut state);
+        state.set_window_focused(true);
+        state.set_window_focused(false);
+        assert_eq!(state.session.as_ref().unwrap().phase(), Phase::Paused);
+        // Regaining focus does not resume: the user must press Resume.
+        state.set_window_focused(true);
+        assert_eq!(state.session.as_ref().unwrap().phase(), Phase::Paused);
+    }
+
+    #[test]
+    fn a_window_that_starts_unfocused_is_not_paused() {
+        let dir = TempDir::new("focus-start");
+        let mut state = app(&dir);
+        start(&mut state);
+        state.set_window_focused(false);
+        assert_eq!(state.session.as_ref().unwrap().phase(), Phase::Running);
+    }
+
+    #[test]
+    fn finish_failure_notice_stays_visible_on_result() {
+        let dir = TempDir::new("write-fail");
+        // A regular file where the data directory should be makes every write fail.
+        let blocker = dir.0.join("not-a-dir");
+        fs::write(&blocker, "x").unwrap();
+        let mut state = AppState::new(Storage::new(&blocker), StdRng::seed_from_u64(1));
+        state.apply(Action::AdjustDuration(-10));
+        start(&mut state);
+        state.tick(Duration::from_secs(60), now());
+        assert_eq!(state.screen, Screen::Result);
+        assert!(matches!(state.notice, Some(Notice::Failure(_))));
+        assert_eq!(state.records.len(), 1);
+        assert!(state.result.is_some());
     }
 
     #[test]

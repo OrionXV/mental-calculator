@@ -15,6 +15,12 @@ pub use storage::Storage;
 fn android_main(android_app: android_activity::AndroidApp) {
     use std::path::PathBuf;
 
+    // Without a logger, `log` output is dropped. Errors then reach logcat (`adb logcat -s mentalcalc`).
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("mentalcalc"),
+    );
     let data_dir = android_app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("."));
@@ -27,6 +33,6 @@ fn android_main(android_app: android_activity::AndroidApp) {
         Box::new(move |cc| Ok(Box::new(App::new(cc, storage, Screen::Main)))),
     );
     if let Err(err) = result {
-        eprintln!("mentalcalc: failed to start: {err}");
+        log::error!("failed to start: {err}");
     }
 }

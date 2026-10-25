@@ -1,27 +1,31 @@
 //! egui drawing. Screens only read `AppState` and push `Action`s, which are
 //! applied after the frame is drawn.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, Color32, FontId, RichText, TextStyle, Ui, Vec2};
 use mentalcalc_core::{Difficulty, Operation, Phase};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::state::{Action, AppState, Dialog, Notice, Screen, grade_for};
+use crate::state::{
+    Action, AppState, Dialog, Notice, Screen, grade_for, percent_correct, total_tasks,
+};
 use crate::storage::{self, Storage};
 use crate::strings::{self, Key, Language, text};
 
-/// Largest real time step applied per frame. Limits the jump after the app resumes.
-const MAX_FRAME_STEP: f32 = 0.5;
 const KEY_HEIGHT: f32 = 60.0;
 const BUTTON_HEIGHT: f32 = 56.0;
+/// Font size for keys whose label is a word (Стереть, Ответ) so they fit a key's width.
+const KEY_WORD_SIZE: f32 = 22.0;
 const CORRECT: Color32 = Color32::from_rgb(46, 125, 50);
 const INCORRECT: Color32 = Color32::from_rgb(198, 40, 40);
 const MUTED: Color32 = Color32::from_rgb(120, 120, 120);
 
 pub struct App {
     state: AppState,
+    /// Monotonic time of the previous frame, used for the session clock.
+    last_frame: Option<Instant>,
 }
 
 impl App {
@@ -29,7 +33,10 @@ impl App {
         configure_style(&cc.egui_ctx);
         let mut state = AppState::new(storage, StdRng::from_os_rng());
         state.open_preview(screen);
-        Self { state }
+        Self {
+            state,
+            last_frame: None,
+        }
     }
 
     pub fn state(&self) -> &AppState {
@@ -39,13 +46,17 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let raw = ctx.input(|input| input.unstable_dt);
-        let dt = if raw.is_finite() {
-            raw.clamp(0.0, MAX_FRAME_STEP)
-        } else {
-            0.0
-        };
-        self.state.tick(Duration::from_secs_f32(dt), storage::now());
+        // TODO(android back button): not handled yet. It needs a device test. When added,
+        // intercept the Back key here and map it to `Action::Open` of the previous screen.
+        // TODO(edge-to-edge): window insets are not applied yet. Needs a device test.
+        let now = Instant::now();
+        let gap = self
+            .last_frame
+            .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        self.last_frame = Some(now);
+        self.state.advance_frame(gap, storage::now());
+        self.state
+            .set_window_focused(ctx.input(|input| input.focused));
         if self.state.screen == Screen::Session || self.state.feedback.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -330,7 +341,7 @@ fn archive_screen(ui: &mut Ui, state: &AppState, lang: Language, out: &mut Vec<A
         ui.label(text(lang, Key::ArchiveEmpty));
     } else {
         let sessions = state.records.len();
-        let solved: u32 = state.records.iter().map(|record| record.tasks).sum();
+        let solved = total_tasks(&state.records);
         ui.label(format!(
             "{}: {sessions}    {}: {solved}",
             text(lang, Key::ArchiveSessions),
@@ -339,9 +350,7 @@ fn archive_screen(ui: &mut Ui, state: &AppState, lang: Language, out: &mut Vec<A
         ui.add_space(4.0);
         for record in &state.records {
             let grade = grade_for(record.tasks, record.correct);
-            let percent = (record.correct * 100)
-                .checked_div(record.tasks)
-                .unwrap_or(0);
+            let percent = percent_correct(record.tasks, record.correct);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
@@ -461,10 +470,17 @@ fn button(ui: &mut Ui, label: impl Into<RichText>, size: Vec2) -> bool {
         .clicked()
 }
 
+/// A keypad key of exactly `size`. Word labels use a smaller font so the text
+/// fits; a wider label would otherwise grow its button past the keypad grid.
 fn keypad(ui: &mut Ui, enabled: bool, label: &str, size: Vec2) -> bool {
+    let font_size = if label.chars().count() > 1 {
+        KEY_WORD_SIZE
+    } else {
+        28.0
+    };
     ui.add_enabled(
         enabled,
-        egui::Button::new(RichText::new(label).size(28.0).strong()).min_size(size),
+        egui::Button::new(RichText::new(label).size(font_size).strong()).min_size(size),
     )
     .clicked()
 }
