@@ -550,7 +550,7 @@ mod tests {
         let dir = TempDir::new("fresh");
         let state = app(&dir);
         assert_eq!(state.screen, Screen::Main);
-        assert_eq!(state.language, Language::Russian);
+        assert_eq!(state.language, Language::English);
         assert_eq!(state.settings, Settings::default());
         assert!(state.records.is_empty());
         assert_eq!(state.skipped_lines, 0);

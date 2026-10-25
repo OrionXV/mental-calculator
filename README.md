@@ -20,7 +20,7 @@ I used the original app a lot when I was bored, and this is a rewrite of it for 
 - **On-screen keypad** for answers. A wrong answer is counted and the problem is skipped. Empty input is ignored.
 - **Results** after each session: percent correct, a grade (below 20%, 20 to 39%, 40 to 69%, 70% and up), and speed in answers per planned minute.
 - **Archive** of past sessions, newest first, with a button to clear it.
-- **Russian and English** interface. Russian is the default, and you can switch in Settings.
+- **English and Russian** interface. English is the default, and you can switch in Settings.
 - **Plain-text data.** Settings are kept in `settings.txt`, and the session archive in `sessions_results.mcd`, using the same line format as the original app.
 
 Not ported: the morning reminder notification, ads, and analytics.

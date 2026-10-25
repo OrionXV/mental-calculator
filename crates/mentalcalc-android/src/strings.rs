@@ -5,8 +5,8 @@ use mentalcalc_core::{Difficulty, Grade, Operation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Language {
-    English,
     #[default]
+    English,
     Russian,
 }
 
@@ -323,7 +323,7 @@ mod tests {
             assert_eq!(Language::from_code(lang.code()), Some(lang));
         }
         assert_eq!(Language::from_code("de"), None);
-        assert_eq!(Language::default(), Language::Russian);
+        assert_eq!(Language::default(), Language::English);
     }
 
     #[test]
