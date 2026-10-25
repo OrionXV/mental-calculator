@@ -4,6 +4,10 @@ A mental arithmetic trainer for Android, written in Rust. Pick how long you want
 
 I used the original app a lot when I was bored, and this is a rewrite of it for current Android. The original was a 2014 Russian-language app. This version keeps its core rules and drops the ads, analytics, and reminder notifications.
 
+## Download
+
+Get the latest signed APK from the [releases page](https://github.com/OrionXV/mental-calculator/releases/latest). Open the file on your Android phone and allow installs from this source when asked. It works on Android 8.0 and up.
+
 ## Features
 
 - **Timed sessions** from 1 to 20 minutes, with pause and resume.
