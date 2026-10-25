@@ -9,10 +9,17 @@
     <application
         android:label="Mental Calculator"
         android:hasCode="false">
+        <!--
+            Handle every configuration change in the running activity instead of
+            recreating it. winit cannot start a second event loop in the same
+            process, so a recreated NativeActivity made the app exit and fail to
+            restart after changes such as dark mode, locale or font scale.
+            Keep this list in sync with the Android configuration change flags.
+        -->
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden">
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|locale|mcc|mnc|layoutDirection|fontScale|density|colorMode|touchscreen|grammaticalGender">
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="mentalcalc_android" />
