@@ -21,7 +21,10 @@ impl fmt::Display for Task {
     }
 }
 
-/// Keeps the previous operand pair so the same pair is not drawn twice in a row.
+/// Keeps the previous DISPLAYED operand pair (`first`, `second` as shown, after the
+/// subtraction swap and the division construction) so the same problem as shown
+/// is not drawn twice in a row. Deliberate deviation from the original Java app,
+/// which compared the raw operand pair.
 #[derive(Debug, Clone)]
 pub struct TaskGenerator {
     difficulty: Difficulty,
@@ -42,17 +45,16 @@ impl TaskGenerator {
     pub fn next_task<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Task {
         let enabled: Vec<Operation> = self.operations.iter().collect();
         let op = enabled[rng.random_range(0..enabled.len())];
-        let (a, b) = loop {
-            let pair = (
-                rng.random_range(self.difficulty.first_range()),
-                rng.random_range(self.difficulty.second_range()),
-            );
-            if Some(pair) != self.previous {
-                break pair;
+        loop {
+            let a = rng.random_range(self.difficulty.first_range());
+            let b = rng.random_range(self.difficulty.second_range());
+            let task = build(op, a, b);
+            let shown = (task.first, task.second);
+            if Some(shown) != self.previous {
+                self.previous = Some(shown);
+                break task;
             }
-        };
-        self.previous = Some((a, b));
-        build(op, a, b)
+        }
     }
 }
 
@@ -248,5 +250,68 @@ mod tests {
         };
         assert_eq!(multiply.to_string(), "12 \u{00D7} 7");
         assert_eq!(divide.to_string(), "84 \u{00F7} 7");
+    }
+
+    #[test]
+    fn displayed_problem_never_repeats_in_a_row() {
+        for difficulty in [
+            Difficulty::Easy,
+            Difficulty::Medium,
+            Difficulty::Hard,
+            Difficulty::Expert,
+        ] {
+            for op in Operation::ALL {
+                let mut rng = StdRng::seed_from_u64(11);
+                let mut tg = generator(difficulty, &[op]);
+                let mut previous = tg.next_task(&mut rng).to_string();
+                for _ in 0..5000 {
+                    let next = tg.next_task(&mut rng).to_string();
+                    assert_ne!(previous, next, "{difficulty:?} {op:?}: repeated {next}");
+                    previous = next;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subtraction_swapped_operands_are_not_redrawn() {
+        // (3, 5) and (5, 3) both display "5 - 3", so they must not follow each other.
+        assert_eq!(
+            build(Operation::Subtract, 3, 5).to_string(),
+            build(Operation::Subtract, 5, 3).to_string()
+        );
+        let mut rng = StdRng::seed_from_u64(5);
+        let mut tg = generator(Difficulty::Easy, &[Operation::Subtract]);
+        let mut previous = tg.next_task(&mut rng).to_string();
+        for _ in 0..20000 {
+            let next = tg.next_task(&mut rng).to_string();
+            assert_ne!(previous, next, "subtraction repeated {next}");
+            previous = next;
+        }
+    }
+
+    #[test]
+    fn every_difficulty_has_enough_distinct_pairs() {
+        for difficulty in [
+            Difficulty::Easy,
+            Difficulty::Medium,
+            Difficulty::Hard,
+            Difficulty::Expert,
+        ] {
+            for op in Operation::ALL {
+                let mut shown = std::collections::HashSet::new();
+                for a in difficulty.first_range() {
+                    for b in difficulty.second_range() {
+                        let task = build(op, a, b);
+                        shown.insert((task.first, task.second));
+                    }
+                }
+                assert!(
+                    shown.len() >= 2,
+                    "{difficulty:?} {op:?}: only {} displayed pair(s)",
+                    shown.len()
+                );
+            }
+        }
     }
 }
