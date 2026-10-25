@@ -8,8 +8,10 @@ use mentalcalc_core::{Difficulty, Operation, Phase};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
+use crate::safe_area::Insets;
 use crate::state::{
-    Action, AppState, Dialog, Notice, Screen, grade_for, percent_correct, total_tasks,
+    Action, AppState, BackTarget, Dialog, Notice, Screen, back_target, grade_for, percent_correct,
+    total_tasks,
 };
 use crate::storage::{self, Storage};
 use crate::strings::{self, Key, Language, text};
@@ -21,11 +23,17 @@ const KEY_WORD_SIZE: f32 = 22.0;
 const CORRECT: Color32 = Color32::from_rgb(46, 125, 50);
 const INCORRECT: Color32 = Color32::from_rgb(198, 40, 40);
 const MUTED: Color32 = Color32::from_rgb(120, 120, 120);
+/// Space around every screen, added to the system-bar insets, in points.
+const PANEL_MARGIN: f32 = 16.0;
 
 pub struct App {
     state: AppState,
     /// Monotonic time of the previous frame, used for the session clock.
     last_frame: Option<Instant>,
+    /// System-bar insets for this frame, refreshed in `logic`.
+    insets: Insets,
+    #[cfg(target_os = "android")]
+    android_app: Option<android_activity::AndroidApp>,
 }
 
 impl App {
@@ -36,19 +44,79 @@ impl App {
         Self {
             state,
             last_frame: None,
+            insets: Insets::default(),
+            #[cfg(target_os = "android")]
+            android_app: None,
         }
+    }
+
+    /// Gives the app the Android handle, which reports the system-bar insets.
+    #[cfg(target_os = "android")]
+    pub fn set_android_app(&mut self, android_app: android_activity::AndroidApp) {
+        self.android_app = Some(android_app);
     }
 
     pub fn state(&self) -> &AppState {
         &self.state
     }
+
+    /// System-bar insets in points. Only Android has them; the desktop uses none.
+    #[cfg(target_os = "android")]
+    fn system_insets(&self, ctx: &egui::Context) -> Insets {
+        use crate::safe_area::{PixelRect, insets_from_content_rect, with_fallback};
+
+        let Some(android_app) = self.android_app.as_ref() else {
+            return Insets::default();
+        };
+        let rect = android_app.content_rect();
+        let pixels_per_point = ctx.pixels_per_point();
+        // egui's own content rect does not subtract system bars on Android (only iOS
+        // fills `safe_area_insets`), so the window size is taken from the viewport.
+        let window = ctx.viewport_rect();
+        let window_width = (window.width() * pixels_per_point).round() as i32;
+        let window_height = (window.height() * pixels_per_point).round() as i32;
+        let content = PixelRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        with_fallback(insets_from_content_rect(
+            content,
+            window_width,
+            window_height,
+            pixels_per_point,
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn system_insets(&self, _ctx: &egui::Context) -> Insets {
+        Insets::default()
+    }
+
+    /// Handles the Android Back key if it arrives. winit maps KEYCODE_BACK to
+    /// `BrowserBack` (winit `platform_impl/android/keycodes.rs`) and reports it as
+    /// handled, so the app acts on it here.
+    ///
+    /// Known blocker: on the emulator (targetSdk 37, no `enableOnBackInvokedCallback`
+    /// opt-out) the system Back key never reaches the app. The Activity finishes
+    /// instead, so this function sees no event. The on-screen Назад and Завершить
+    /// buttons are the working path. This code is kept for when the key is delivered
+    /// (for example, a newer winit or android-activity, or a Java
+    /// `OnBackPressedCallback` that calls into Rust).
+    fn handle_back(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.key_pressed(egui::Key::BrowserBack)) {
+            return;
+        }
+        match back_target(self.state.screen, self.state.dialog) {
+            BackTarget::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            BackTarget::Do(action) => self.state.apply(action),
+        }
+    }
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // TODO(android back button): not handled yet. It needs a device test. When added,
-        // intercept the Back key here and map it to `Action::Open` of the previous screen.
-        // TODO(edge-to-edge): window insets are not applied yet. Needs a device test.
         let now = Instant::now();
         let gap = self
             .last_frame
@@ -57,6 +125,8 @@ impl eframe::App for App {
         self.state.advance_frame(gap, storage::now());
         self.state
             .set_window_focused(ctx.input(|input| input.focused));
+        self.insets = self.system_insets(ctx);
+        self.handle_back(ctx);
         if self.state.screen == Screen::Session || self.state.feedback.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -65,7 +135,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let mut actions = Vec::new();
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(ui.style()).inner_margin(16.0))
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(panel_margin(self.insets)))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -453,15 +523,15 @@ fn dialog_window(ctx: &egui::Context, dialog: Dialog, lang: Language, out: &mut 
         });
 }
 
+/// Back button on its own row, with the title below it. A title beside the button
+/// would not wrap, so on a narrow phone it ran past the right edge.
 fn header(ui: &mut Ui, lang: Language, title: Key, back: Option<Screen>, out: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        if let Some(screen) = back
-            && button(ui, text(lang, Key::Back), Vec2::new(0.0, BUTTON_HEIGHT))
-        {
-            out.push(Action::Open(screen));
-        }
-        ui.heading(text(lang, title));
-    });
+    if let Some(screen) = back
+        && button(ui, text(lang, Key::Back), Vec2::new(0.0, BUTTON_HEIGHT))
+    {
+        out.push(Action::Open(screen));
+    }
+    ui.add(egui::Label::new(RichText::new(text(lang, title)).heading()).wrap());
     ui.add_space(8.0);
 }
 
@@ -497,6 +567,22 @@ fn notice_line(ui: &mut Ui, notice: Option<&Notice>, lang: Language) {
     ui.label(RichText::new(message).color(INCORRECT));
 }
 
+/// The screen margin with the system-bar insets added to each side. egui's `Margin`
+/// stores whole points as `i8`, so values are clamped to that range.
+fn panel_margin(insets: Insets) -> egui::Margin {
+    let side = |inset: f32| {
+        (PANEL_MARGIN + inset)
+            .round()
+            .clamp(0.0, f32::from(i8::MAX)) as i8
+    };
+    egui::Margin {
+        left: side(insets.left),
+        right: side(insets.right),
+        top: side(insets.top),
+        bottom: side(insets.bottom),
+    }
+}
+
 /// `m:ss`, rounding up so the display shows 0:00 only when time is up.
 pub fn format_remaining(remaining: Duration) -> String {
     let secs = remaining.as_secs_f64().ceil() as u64;
@@ -520,5 +606,74 @@ mod tests {
         assert_eq!(format_remaining(Duration::from_millis(59_100)), "1:00");
         assert_eq!(format_remaining(Duration::from_secs(9)), "0:09");
         assert_eq!(format_remaining(Duration::ZERO), "0:00");
+    }
+
+    /// Runs one egui pass in which the Back key was pressed. Returns the root
+    /// viewport commands that pass produced.
+    fn press_back(app: &mut App) -> Vec<egui::ViewportCommand> {
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::BrowserBack,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output = egui::Context::default().run_ui(input, |ui| app.handle_back(ui.ctx()));
+        // Font uploads are not needed here, and epaint asserts they are handled before drop.
+        output.textures_delta.clear();
+        output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .clone()
+    }
+
+    fn app_on(screen: Screen) -> App {
+        let storage = Storage::new(std::env::temp_dir().join("mentalcalc-app-back-test"));
+        let mut state = AppState::new(storage, StdRng::seed_from_u64(1));
+        state.open_preview(screen);
+        App {
+            state,
+            last_frame: None,
+            insets: Insets::default(),
+            #[cfg(target_os = "android")]
+            android_app: None,
+        }
+    }
+
+    #[test]
+    fn back_key_on_main_asks_egui_to_close_the_app() {
+        let mut app = app_on(Screen::Main);
+        let commands = press_back(&mut app);
+        assert!(commands.contains(&egui::ViewportCommand::Close));
+    }
+
+    #[test]
+    fn back_key_on_a_session_opens_the_end_dialog() {
+        let mut app = app_on(Screen::Session);
+        let _ = press_back(&mut app);
+        assert_eq!(app.state.dialog, Some(Dialog::EndSession));
+        assert_eq!(app.state.screen, Screen::Session);
+    }
+
+    #[test]
+    fn desktop_margin_is_unchanged_without_insets() {
+        assert_eq!(panel_margin(Insets::default()), egui::Margin::same(16));
+    }
+
+    #[test]
+    fn insets_are_added_to_the_margin_and_clamped() {
+        let insets = Insets {
+            left: 0.0,
+            top: 36.6,
+            right: 2.0,
+            bottom: 500.0,
+        };
+        let margin = panel_margin(insets);
+        assert_eq!(margin.top, 53);
+        assert_eq!(margin.right, 18);
+        assert_eq!(margin.left, 16);
+        assert_eq!(margin.bottom, i8::MAX);
     }
 }

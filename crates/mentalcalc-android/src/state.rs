@@ -101,6 +101,31 @@ pub enum Action {
     CancelDialog,
 }
 
+/// What the Android Back key does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackTarget {
+    /// Close the app.
+    Exit,
+    /// Apply this action.
+    Do(Action),
+}
+
+/// Maps the Back key to its action. An open dialog closes first. On the Session
+/// screen Back asks the same question as the End button, so a session is never
+/// discarded without confirmation.
+pub fn back_target(screen: Screen, dialog: Option<Dialog>) -> BackTarget {
+    if dialog.is_some() {
+        return BackTarget::Do(Action::CancelDialog);
+    }
+    match screen {
+        Screen::Main => BackTarget::Exit,
+        Screen::Session => BackTarget::Do(Action::AskEndSession),
+        Screen::SessionSettings | Screen::Result | Screen::Archive | Screen::Settings => {
+            BackTarget::Do(Action::Open(Screen::Main))
+        }
+    }
+}
+
 pub struct AppState {
     pub screen: Screen,
     pub language: Language,
@@ -846,6 +871,38 @@ mod tests {
         assert!(matches!(state.notice, Some(Notice::Failure(_))));
         assert_eq!(state.records.len(), 1);
         assert!(state.result.is_some());
+    }
+
+    #[test]
+    fn back_key_targets_for_each_screen() {
+        assert_eq!(back_target(Screen::Main, None), BackTarget::Exit);
+        assert_eq!(
+            back_target(Screen::Session, None),
+            BackTarget::Do(Action::AskEndSession)
+        );
+        for screen in [
+            Screen::SessionSettings,
+            Screen::Result,
+            Screen::Archive,
+            Screen::Settings,
+        ] {
+            assert_eq!(
+                back_target(screen, None),
+                BackTarget::Do(Action::Open(Screen::Main))
+            );
+        }
+    }
+
+    #[test]
+    fn back_key_closes_an_open_dialog_first() {
+        assert_eq!(
+            back_target(Screen::Session, Some(Dialog::EndSession)),
+            BackTarget::Do(Action::CancelDialog)
+        );
+        assert_eq!(
+            back_target(Screen::Archive, Some(Dialog::ClearArchive)),
+            BackTarget::Do(Action::CancelDialog)
+        );
     }
 
     #[test]

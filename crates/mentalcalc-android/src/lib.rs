@@ -2,6 +2,7 @@
 //! Android and in the desktop example used for screenshots.
 
 pub mod app;
+pub mod safe_area;
 pub mod state;
 pub mod storage;
 pub mod strings;
@@ -25,14 +26,24 @@ fn android_main(android_app: android_activity::AndroidApp) {
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("."));
     let storage = Storage::new(data_dir);
-    let mut options = eframe::NativeOptions::default();
-    options.android_app = Some(android_app);
+    let options = eframe::NativeOptions {
+        android_app: Some(android_app.clone()),
+        ..Default::default()
+    };
     let result = eframe::run_native(
         "Mental Calculator",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, storage, Screen::Main)))),
+        Box::new(move |cc| {
+            let mut app = App::new(cc, storage, Screen::Main);
+            app.set_android_app(android_app);
+            Ok(Box::new(app))
+        }),
     );
     if let Err(err) = result {
         log::error!("failed to start: {err}");
     }
+    // winit creates its event loop once per process and cannot create a second one.
+    // A later launch in the same process would then hang on the splash screen, so end
+    // the process whenever the activity returns and let the next launch start clean.
+    std::process::exit(0);
 }
