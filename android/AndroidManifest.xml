@@ -8,6 +8,7 @@
 
     <application
         android:label="Mental Calculator"
+        android:enableOnBackInvokedCallback="false"
         android:hasCode="false">
         <!--
             Handle every configuration change in the running activity instead of
