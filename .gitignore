@@ -1,0 +1,9 @@
+# Rust build output
+/target/
+
+# Original Android package and local signing material
+*.apk
+*.keystore
+
+# macOS
+.DS_Store
