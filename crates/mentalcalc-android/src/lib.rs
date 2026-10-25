@@ -45,5 +45,8 @@ fn android_main(android_app: android_activity::AndroidApp) {
     // winit creates its event loop once per process and cannot create a second one.
     // A later launch in the same process would then hang on the splash screen, so end
     // the process whenever the activity returns and let the next launch start clean.
-    std::process::exit(0);
+    // exit() runs destructors while binder threads are still alive, which aborts the process,
+    // so _exit is used to skip them.
+    // SAFETY: _exit only terminates the process and never returns; no Rust state is touched afterwards.
+    unsafe { libc::_exit(0) }
 }

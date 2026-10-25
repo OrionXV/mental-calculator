@@ -981,6 +981,7 @@ dependencies = [
  "eframe",
  "egui",
  "image",
+ "libc",
  "log",
  "mentalcalc-core",
  "rand",
